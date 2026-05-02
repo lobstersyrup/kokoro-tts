@@ -1,0 +1,15 @@
+__pycache__/
+tests/
+.venv/
+.git/
+.github/
+*.md
+!README.md
+.env
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,16 @@
+[Unit]
+Description=Kokoro TTS Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/path/to/kokoro-tts/.venv/bin/python /path/to/kokoro-tts/kokoro_server.py
+Restart=always
+RestartSec=5
+WorkingDirectory=/path/to/kokoro-tts
+Environment=HOME=/home/YOUR_USER
+Environment=PATH=/path/to/kokoro-tts/.venv/bin:/usr/bin:/bin
+Environment=KOKORO_API_KEY=change_me_to_a_secure_random_string
+
+[Install]
+WantedBy=default.target

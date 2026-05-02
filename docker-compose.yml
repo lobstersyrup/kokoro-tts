@@ -1,0 +1,26 @@
+services:
+  kokoro-tts:
+    build: .
+    container_name: kokoro-tts
+    ports:
+      - "${KOKORO_PORT:-8880}:${KOKORO_PORT:-8880}"
+    environment:
+      - KOKORO_HOST=0.0.0.0
+      - KOKORO_PORT=${KOKORO_PORT:-8880}
+      - KOKORO_MAX_CONCURRENT=${KOKORO_MAX_CONCURRENT:-4}
+      - KOKORO_DEFAULT_VOICE=${KOKORO_DEFAULT_VOICE:-af_heart}
+      - KOKORO_DEFAULT_MODEL=${KOKORO_DEFAULT_MODEL:-tts-1}
+      # - KOKORO_API_KEY=your-secret-key  # Uncomment to enable API key auth
+    volumes:
+      - kokoro-model-cache:/root/.kokoro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${KOKORO_PORT:-8880}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  kokoro-model-cache:
+    name: kokoro-model-cache

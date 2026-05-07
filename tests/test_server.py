@@ -76,7 +76,7 @@ class TestAudioConversion:
             + (16).to_bytes(2, "little") + b"data" + (0).to_bytes(4, "little")
         )
         result = _convert_audio(wav, "mp3")
-        # MP3 files start with ID3 or ffd8 (for some players)
+        # MP3 files start with ID3 or ff fb
         assert result[:3] == b"ID3" or result[:2] == b"\xff\xfb"
         assert len(result) > 0
 
@@ -110,18 +110,225 @@ class TestAudioConversion:
 import httpx
 import pytest
 
+BASE = "http://localhost:8880"
+TIMEOUT = 60.0
+
+def _assert_valid_audio(response, expected_status=200):
+    """Assert response is valid audio and return response for further checks."""
+    assert response.status_code == expected_status, (
+        f"Expected {expected_status}, got {response.status_code}: {response.text[:200]}"
+    )
+    ct = response.headers.get("content-type", "")
+    assert ct.startswith("audio/"), f"Expected audio/* content-type, got: {ct}"
+    assert len(response.content) > 0
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Happy path — valid voice + valid model combinations
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_voice_equals_model():
+    """voice == model (both valid voices): basic happy path."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "af_heart",
+            "input": "Hello world",
+            "voice": "af_heart",
+            "response_format": "mp3",
+        })
+    _assert_valid_audio(response)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_non_default_voice_with_standard_model():
+    """voice=af_bella (non-default) with model=tts-1 (standard OpenAI model)."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "tts-1",
+            "input": "Hello world",
+            "voice": "af_bella",
+            "response_format": "mp3",
+        })
+    _assert_valid_audio(response)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_default_voice_with_non_voice_model():
+    """voice=af_heart (default) with model=kokoro (non-voice, non-standard).
+    This was the bug case: model must NOT be used as voice."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "kokoro",
+            "input": "Hello world",
+            "voice": "af_heart",
+            "response_format": "mp3",
+        })
+    _assert_valid_audio(response)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_default_voice_with_invalid_model():
+    """voice=af_heart (default) with model=tts-1-hd (non-voice, standard OpenAI model).
+    model should be ignored; voice should be used as-is."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "tts-1-hd",
+            "input": "Hello world",
+            "voice": "af_heart",
+            "response_format": "mp3",
+        })
+    _assert_valid_audio(response)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_model_is_voice_no_voice_param():
+    """OpenAI compat: model is a valid voice name, no voice param set.
+    Should fall back to using model as the voice."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "af_bella",
+            "input": "OpenAI compat test",
+        })
+    _assert_valid_audio(response)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_model_is_voice_voice_is_default():
+    """model is a different valid voice, voice is default (af_heart).
+    voice param should win — use af_heart, not model."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "af_bella",
+            "input": "Voice should win",
+            "voice": "af_heart",
+            "response_format": "mp3",
+        })
+    _assert_valid_audio(response)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_speech_wav_format():
+    """POST /v1/audio/speech with response_format=wav should return audio/wav."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "af_heart",
+            "input": "Testing wav output",
+            "voice": "af_heart",
+            "response_format": "wav",
+        })
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    assert len(response.content) > 0
+
+
+# ---------------------------------------------------------------------------
+# Error cases — when voice is invalid, server should return an error
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_invalid_voice_with_valid_model():
+    """voice=not_a_real_voice (invalid), model=tts-1 (valid standard model).
+    Should fail — unrecognized voice name."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "tts-1",
+            "input": "Hello",
+            "voice": "not_a_real_voice",
+            "response_format": "mp3",
+        })
+    assert response.status_code >= 400, (
+        f"Expected error for invalid voice, got {response.status_code}: {response.text[:200]}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_invalid_voice_and_invalid_model():
+    """Both voice and model are invalid, non-voice strings.
+    Should fail — nothing to fall back to."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "not_a_real_voice",
+            "input": "Hello",
+            "voice": "not_a_real_voice",
+            "response_format": "mp3",
+        })
+    assert response.status_code >= 400, (
+        f"Expected error for invalid voice+model, got {response.status_code}: {response.text[:200]}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_invalid_voice_model_is_valid_voice():
+    """voice=invalid, model=af_bella (valid voice). Should fail — voice param is
+    checked first and model is not used as fallback when voice is explicitly invalid."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "af_bella",
+            "input": "Hello",
+            "voice": "not_a_real_voice",
+            "response_format": "mp3",
+        })
+    assert response.status_code >= 400, (
+        f"Expected error for invalid voice, got {response.status_code}: {response.text[:200]}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_empty_input_returns_400():
+    """Empty input string should return 400."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "tts-1",
+            "input": "",
+            "voice": "af_heart",
+        })
+    assert response.status_code == 400, (
+        f"Expected 400 for empty input, got {response.status_code}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_unsupported_format_returns_400():
+    """Unsupported response_format should return 400."""
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
+        response = await client.post("/v1/audio/speech", json={
+            "model": "tts-1",
+            "input": "Hello",
+            "voice": "af_heart",
+            "response_format": "flac",
+        })
+    assert response.status_code == 400, (
+        f"Expected 400 for unsupported format, got {response.status_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Non-auth endpoints
+# ---------------------------------------------------------------------------
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_health_endpoint():
     """GET /health should return 200 with a valid status field."""
-    async with httpx.AsyncClient(base_url="http://localhost:8880", timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
         response = await client.get("/health")
     assert response.status_code == 200
     data = response.json()
-    # Accept "ok", "ready", or "loading" for backward compatibility
     assert data["status"] in ("ok", "ready", "loading")
-    # Extended fields (present in newer servers, optional for backward compat)
     if "voices" in data:
         assert data["voices"] > 0
     if "formats" in data:
@@ -132,73 +339,13 @@ async def test_health_endpoint():
 @pytest.mark.asyncio
 async def test_models_endpoint():
     """GET /v1/models should return a list of all available voices."""
-    async with httpx.AsyncClient(base_url="http://localhost:8880", timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=BASE, timeout=TIMEOUT) as client:
         response = await client.get("/v1/models")
     assert response.status_code == 200
     data = response.json()
-    # Newer servers return {"object": "list", "data": [...]}
-    # Older servers may not have this endpoint (returns HTML 404)
     if "object" in data:
         assert data["object"] == "list"
         assert len(data["data"]) > 0
         voice_ids = {m["id"] for m in data["data"]}
         assert "af_heart" in voice_ids
         assert "am_adam" in voice_ids
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_speech_generation_mp3():
-    """POST /v1/audio/speech with response_format=mp3 should return audio/mpeg."""
-    async with httpx.AsyncClient(base_url="http://localhost:8880", timeout=60.0) as client:
-        response = await client.post(
-            "/v1/audio/speech",
-            json={
-                "model": "af_heart",
-                "input": "Hello world",
-                "voice": "af_heart",
-                "response_format": "mp3",
-            },
-        )
-    assert response.status_code == 200
-    # Accept audio/mpeg, audio/mp3, or audio/wav (old server default) for backward compat
-    ct = response.headers.get("content-type", "")
-    assert ct.startswith("audio/"), f"Expected audio/* content-type, got: {ct}"
-    assert len(response.content) > 0
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_speech_generation_wav():
-    """POST /v1/audio/speech with response_format=wav should return audio/wav."""
-    async with httpx.AsyncClient(base_url="http://localhost:8880", timeout=60.0) as client:
-        response = await client.post(
-            "/v1/audio/speech",
-            json={
-                "model": "af_heart",
-                "input": "Testing wav output",
-                "voice": "af_heart",
-                "response_format": "wav",
-            },
-        )
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "audio/wav"
-    assert len(response.content) > 0
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_invalid_voice_returns_422():
-    """POST /v1/audio/speech with an unknown voice should return 4xx or 5xx (graceful error)."""
-    async with httpx.AsyncClient(base_url="http://localhost:8880", timeout=30.0) as client:
-        response = await client.post(
-            "/v1/audio/speech",
-            json={
-                "model": "not_a_real_voice",
-                "input": "Hello",
-                "voice": "not_a_real_voice",
-                "response_format": "mp3",
-            },
-        )
-    # Accept 4xx (new server) or 5xx (old server) — both indicate graceful error handling
-    assert 400 <= response.status_code < 600, f"Expected client error, got {response.status_code}"

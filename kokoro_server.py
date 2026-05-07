@@ -168,8 +168,12 @@ async def generate_speech(request: Request, req: SpeechRequest):
     if not req.input:
         raise HTTPException(400, "input is required")
 
-    # Normalize: prefer `voice` kwarg, fall back to `model` for OpenAI compat.
-    voice = req.voice if req.voice != _DEFAULT_VOICE else (req.model if req.model != _DEFAULT_MODEL else _DEFAULT_VOICE)
+    # Normalize: use `voice` directly. Only fall back to `model` for OpenAI
+    # compat when voice is unset (matches default) AND model is a valid voice.
+    # Prevents non-voice model names (like "kokoro") from being used as voices.
+    voice = req.voice
+    if voice == _DEFAULT_VOICE and req.model != _DEFAULT_MODEL and req.model in KOKORO_VOICES:
+        voice = req.model
 
     output_format = (req.response_format or "mp3").lower()
     if output_format not in FORMAT_CODECS:
